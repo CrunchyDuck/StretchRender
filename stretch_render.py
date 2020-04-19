@@ -12,9 +12,11 @@ bl_info = {
 
 def register():
 	bpy.utils.register_class(RENDER_OT_stretch_render)
+	#bpy.utils.register_class(VIEW3D_PT_stretch_render)
 
 def unregister():
 	bpy.utils.unregister_class(RENDER_OT_stretch_render)
+	#bpy.utils.unregister_class(VIEW3D_PT_stretch_render)
 
 
 # Thanks to Arix for guiding and motivating me. Visit his cute website at arix.cc where he talks about cool stuff he's been doing.
@@ -32,7 +34,7 @@ class RENDER_OT_stretch_render(bpy.types.Operator):
 		print("-------------------------------\nEXECUTING STRETCH RENDER")
 		target_scene = bpy.context.scene
 		start_frame = target_scene.frame_start
-		end_frame = target_scene.frame_end
+		end_frame = 120 #target_scene.frame_end
 		total_frames = end_frame - start_frame
 
 		target_layer = bpy.context.view_layer
@@ -49,27 +51,36 @@ class RENDER_OT_stretch_render(bpy.types.Operator):
 			layer_actions = self.parse_layer(i)
 			active_actions = active_actions + layer_actions
 
-
 		# Search through the F-curves of the active actions and figure out where their "empty" space is, then index that empty space to compare against other f-curves
 		for i in active_actions:
 			f_curve = i.fcurves # An action contains an "F_curve" for each line of animation, E.G one for X, Y, and Z position.
-
 			# Maybe I should check if f_curves and keyframe are None?
 			for j in f_curve:
-				keyframe = j.keyframe_points
-
-				for ii in keyframe:
-					keyframe_frame = ii.co[0]
+				keyframes = j.keyframe_points
+				number_of_keyframes = len(keyframes)
+				for iterator, ii in enumerate(keyframes):
+					keyframe_frame = int(ii.co[0])
 					interp = ii.interpolation # If the interpolation is anything besides constant, that means all frames between this one and the next are reserved.
+					curr_y = ii.co[1] # The y position of this keyframe. If it matches another keyframe, it and all frames between should be the same.
 
-					if interp != "CONSTANT": # I couldn't get comparing enums to work so I'm comparing strings instead. Whoops.
-						print("Keyframe on action " + i.name + ", curve " + j.data_path + ", frame " + str(keyframe_frame) + " is set to interpolation type " + str(interp) + " and not CONSTANT.")
+					if iterator < number_of_keyframes - 1:  # Only try to check the next keyframe if we're not at the end of the array, so we don't get indexing issues.
+						next_keyframe = keyframes[iterator + 1]
+						next_keyframe_frame = int(next_keyframe.co[0])
+						next_y = next_keyframe.co[1]  # Y position for the next keyframe. If this matches the current y position, then the frames are the same and interpolation shouldn't matter.
 
+						if not (curr_y is next_y):
+							if interp != "CONSTANT":  # If the interpolation isn't constant, we'll render all frames after this keyframe until the next keyframe.
+								frames_to_render = [x for x in range(keyframe_frame + 1, next_keyframe_frame + 1)]
+								print("Keyframe on action {0}, curve {1}, frame {2} is animated without CONSTANT interpolation.".format(i.name, j.data_path, str(keyframe_frame)))  # I want to output these to a file in the future so that people can see what they might not have set up properly.
+							else: # If it is set to constant, we only need to mark the next frame for change.
+								frames_to_render = [next_keyframe_frame]
 
+							empty_frames = list(set(empty_frames) - set(frames_to_render))
 
+						# A little note on optimization as of writing this. I need to find the difference between two arrays: One array which will contain all numbers from start to end, and another array which will contain random numbers within.
+						# There seems to be ten dozen ways to do this, using sets, removing individual numbers, using the numpy.unique function. As of right now, I have no way of benchmarking these functions and do not know which is the fastest.
 
-
-
+		print(empty_frames)
 		return {"FINISHED"}
 
 	def parse_layer(self, layer_wrapper):
@@ -81,31 +92,34 @@ class RENDER_OT_stretch_render(bpy.types.Operator):
 		# Check objects within this layer.
 		if layer_wrapper.is_visible:  # If the layer is set to be invisible, then none of the OBJECTS inside of it can render. Other layers contained may still render, however.
 			collection_objects = collection.objects
-			if layer_wrapper.name == "Houses":
-				for i in collection_objects:
-					print(i.name)
 
 			# Cycle through all objects stored within this collection.
-			for j in collection_objects:
-				if j.hide_render:  # If the object is invisible, then move on to the next object.
+			for object in collection_objects:
+				if object is None: # Not sure if this can happen, but might as well be safe.
 					continue
 
-				# Collect animation data about this object. AS FAR AS I KNOW, objects can only have one action each, therefore I can simply take the single action, and store that.
-				object_animation = j.animation_data
-				if object_animation is None: # Does this object have any animation at all?
+				if object.hide_render:  # If the object is invisible, then move on to the next object.
 					continue
 
-				object_action = object_animation.action
-				if object_action is None: # If this object doesn't have an action, ignore it.
-					continue
+				# Check the object for animation
+				object_animation = object.animation_data
+				if object_animation is not None: # Does this object have any animation at all?
+					object_action = object_animation.action
+					if object_action is not None: # If this object doesn't have an action, ignore it.
+						actions.append(object_action)
 
-				actions.append(object_action)
+				# Check the object's data block for animation.
+				if object.data is not None:
+					data_animation = object.data.animation_data # I'm not sure on all of the locations animation data can be stored, but I've found instances of it being stored in the data of an object.
+					if data_animation is not None: # Does this object have any animation at all?
+						data_action = data_animation.action
+						if data_action is not None: # If this object doesn't have an action, ignore it.
+							actions.append(data_action)
 
 		for i in layer_collection_children:
-			self.parse_layer(i)
+			actions = actions + self.parse_layer(i)
 
 		return(actions)
-
 
 
 if __name__ == "__main__":
@@ -120,3 +134,5 @@ if __name__ == "__main__":
 # Speed, I am almost certainly not going to be able to optimize this on my own, and I will need to see if speed of my operations is a major concern.
 # Check to make sure that this works with more than one scene.
 # I should allow my code to "print" a log that specifies the location of any non-constant animations.
+# Add checks for animations that are not tied to objects (E.G grease pencil animation)
+# It currently does not remove the first instance of a keyframe appearing, must fix later.
